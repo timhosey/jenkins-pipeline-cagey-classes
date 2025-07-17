@@ -1,7 +1,10 @@
-import os
+import requests
 import re
+import os
 
-# Reuse danger patterns
+TARGET_EXTENSIONS = [".groovy", "Jenkinsfile", ".Jenkinsfile"]
+
+# Dangerous patterns for pipelines to run
 DANGER_PATTERNS = {
     '@NonCPS': r'@NonCPS',
     'JsonSlurper': r'new\s+JsonSlurper\(\)',
@@ -10,14 +13,10 @@ DANGER_PATTERNS = {
     'Socket': r'Socket',
 }
 
-# Linter pattern for global var detection (basic)
+# This should detect inadvertently declared global vars in a pipeline
 GLOBAL_VAR_PATTERN = re.compile(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*[^=]', re.MULTILINE)
 
-def detect_global_vars(filepath):
-    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-
-    # Remove comments and pipeline blocks to reduce false positives
+def detect_global_vars(content):
     content_cleaned = re.sub(r'//.*', '', content)
     content_cleaned = re.sub(r'(?s)pipeline\s*{.*?}', '', content_cleaned)
 
@@ -28,26 +27,31 @@ def detect_global_vars(filepath):
             findings.append(var_name)
     return findings
 
-def scan_file(filepath):
-    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
+def scan_content(content):
     findings = []
     for name, pattern in DANGER_PATTERNS.items():
         if re.search(pattern, content):
             findings.append(name)
-    global_issues = detect_global_vars(filepath)
+    global_issues = detect_global_vars(content)
     if global_issues:
         findings.append(f"Global vars: {', '.join(global_issues)}")
     return findings
 
-def scan_repo(root_path):
-    for subdir, _, files in os.walk(root_path):
-        for file in files:
-            if file.endswith(".groovy") or file == "Jenkinsfile":
-                full_path = os.path.join(subdir, file)
-                issues = scan_file(full_path)
-                if issues:
-                    print(f"⚠️ {full_path} -> {', '.join(issues)}")
+def scan_github_repo(owner, repo, path=""):
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+    response = requests.get(url)
+    response.raise_for_status()
+    items = response.json()
 
-# Example usage
-scan_repo('./test-scan')
+    for item in items:
+        if item['type'] == 'file' and (os.path.splitext(item['name'])[1] in TARGET_EXTENSIONS or item['name'] in TARGET_EXTENSIONS):
+            raw_url = item['download_url']
+            content = requests.get(raw_url).text
+            issues = scan_content(content)
+            if issues:
+                print(f"☠️ {item['path']} -> {', '.join(issues)}")
+        elif item['type'] == 'dir':
+            scan_github_repo(owner, repo, item['path'])
+
+# Example usage:
+scan_github_repo("timhosey", "jenkinsfiles")
